@@ -3,12 +3,12 @@ use facecam::modules::render_camera::{EffectsActivationConfig, RenderCamera};
 
 const MAX_ZOOM_FACTOR: f32 = 10f32;
 
-pub struct ViewApp<'a> {
-    camera: RenderCamera<'a>,
+pub struct ViewApp {
+    camera: RenderCamera,
     rotate_delta: f32,
 }
 
-impl<'a> Default for ViewApp<'a> {
+impl Default for ViewApp {
     fn default() -> Self {
         Self {
             camera: RenderCamera::default(),
@@ -17,7 +17,7 @@ impl<'a> Default for ViewApp<'a> {
     }
 }
 
-impl<'a> eframe::App for ViewApp<'a> {
+impl eframe::App for ViewApp {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, _frame: &mut eframe::Frame) {
         ui.request_repaint();
 

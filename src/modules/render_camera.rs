@@ -1,36 +1,31 @@
-use std::{
-    cell::RefCell,
-    rc::Rc,
-};
+use std::{cell::RefCell, rc::Rc};
 
 use fast_image_resize::images::Image;
 use image::ImageBuffer;
 use imageproc::geometric_transformations::Border;
+use ndarray::{ArrayD, Axis};
 use nokhwa::{
     pixel_format::{RgbAFormat, RgbFormat},
     utils::{RequestedFormat, RequestedFormatType},
     Camera,
 };
-use onnxruntime::{
-    environment::Environment,
-    ndarray::{Array4, ArrayBase, ArrayD, Axis, Dim, IxDynImpl, OwnedRepr},
-    session::Session,
-    GraphOptimizationLevel, LoggingLevel,
+use ort::{
+    session::{builder::GraphOptimizationLevel, Session},
+    value::TensorRef,
 };
 
 const CONFIDENCE_THRESHOLD: f32 = 0.55;
 
-pub struct RenderCamera<'a> {
+pub struct RenderCamera {
     camera: nokhwa::Camera,
     virtual_camera: virtualcam_rs::Camera,
-    _ort_env: &'a Environment,
-    ort_session: Session<'a>,
+    ort_session: Session,
     frame_count: u8,
     pub effects_config: Rc<RefCell<EffectsConfig>>,
     latest_raw_box: DetectionRect<f32>,
 }
 
-impl<'a> Default for RenderCamera<'a> {
+impl Default for RenderCamera {
     fn default() -> Self {
         let camera = Camera::new(
             nokhwa::utils::CameraIndex::Index(0),
@@ -46,28 +41,18 @@ impl<'a> Default for RenderCamera<'a> {
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/version-RFB-640.onnx", path.display());
 
-        let ort_env = Box::leak(Box::new(
-            Environment::builder()
-                .with_name("face_detection")
-                .with_log_level(LoggingLevel::Warning)
-                .build()
-                .expect("Failed to create ONNX environment"),
-        ));
-
-        let ort_session = ort_env
-            .new_session_builder()
-            .expect("Failed to create ONNX session builder")
-            .with_optimization_level(GraphOptimizationLevel::Extended)
-            .expect("Failed to set optimization level")
-            .with_number_threads(4)
-            .expect("Failed to set threads count")
-            .with_model_from_file(path)
+        let ort_session = Session::builder()
+            .unwrap()
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .unwrap()
+            .with_intra_threads(4)
+            .unwrap()
+            .commit_from_file(path)
             .expect("Failed to load ONNX model");
 
         Self {
             camera,
             virtual_camera,
-            _ort_env: ort_env,
             ort_session,
             frame_count: 0,
             latest_raw_box: DetectionRect::default(),
@@ -76,7 +61,7 @@ impl<'a> Default for RenderCamera<'a> {
     }
 }
 
-impl<'a> Drop for RenderCamera<'a> {
+impl Drop for RenderCamera {
     fn drop(&mut self) {
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/on_exit_img.jpg", path.display());
@@ -88,26 +73,32 @@ impl<'a> Drop for RenderCamera<'a> {
     }
 }
 
-impl<'a> RenderCamera<'a> {
+impl RenderCamera {
     pub fn set_camera_image(&mut self) {
         match self.camera.frame() {
             Ok(frame) => {
                 let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
                     frame.decode_image::<RgbAFormat>().unwrap();
 
-                let effect_config = self.effects_config.clone();
-                if effect_config.borrow().activations.is_zoom {
+                let effects = self.effects_config.borrow();
+
+                if effects.activations.is_zoom {
+                    drop(effects);
                     image = self.get_zoomed_face(image);
+                } else {
+                    drop(effects);
                 };
 
-                image = if effect_config.borrow().activations.is_racoon {
+                let effects = self.effects_config.borrow();
+                image = if effects.activations.is_racoon {
+                    drop(effects);
                     self.get_rotated_img(image)
                 } else {
+                    drop(effects);
                     self.get_color_effected_image(image)
                 };
 
                 let pixels = get_pixels_from_img(image);
-
                 let _ = self.virtual_camera.send(pixels);
             }
             Err(e) => {
@@ -129,22 +120,29 @@ impl<'a> RenderCamera<'a> {
         self.frame_count += 1;
         if self.frame_count % 3 == 0 || self.latest_raw_box.is_default() {
             let resized_frame = get_resized_image(&frame, model_w, model_h);
-            let mut tensor = Array4::<f32>::zeros((1, 3, model_h as usize, model_w as usize));
-            for (x, y, pixel) in resized_frame.enumerate_pixels() {
-                tensor[[0, 0, y as usize, x as usize]] = pixel[0] as f32 / 255.0;
-                tensor[[0, 1, y as usize, x as usize]] = pixel[1] as f32 / 255.0;
-                tensor[[0, 2, y as usize, x as usize]] = pixel[2] as f32 / 255.0;
-            }
+            let (scores_array, boxes_array) = {
+                let mut input =
+                    ndarray::Array4::<f32>::zeros((1, 3, model_h as usize, model_w as usize));
+                for (x, y, pixel) in resized_frame.enumerate_pixels() {
+                    input[[0, 0, y as usize, x as usize]] = pixel[0] as f32 / 255.0;
+                    input[[0, 1, y as usize, x as usize]] = pixel[1] as f32 / 255.0;
+                    input[[0, 2, y as usize, x as usize]] = pixel[2] as f32 / 255.0;
+                }
 
-            let (scores_array, boxes_array): (ArrayD<f32>, ArrayD<f32>) = {
-                let outputs = match self.ort_session.run(vec![tensor]) {
+                let outputs = match self
+                    .ort_session
+                    .run(ort::inputs![TensorRef::from_array_view(&input).unwrap()])
+                {
                     Ok(o) => o,
                     Err(e) => {
                         eprintln!("❌ ONNX inference failed: {:?}", e);
                         return frame;
                     }
                 };
-                (outputs[0].to_owned(), outputs[1].to_owned())
+
+                let scores_array = outputs[0].try_extract_array::<f32>().unwrap().to_owned();
+                let boxes_array = outputs[1].try_extract_array::<f32>().unwrap().to_owned();
+                (scores_array, boxes_array)
             };
 
             let scores_slice = scores_array.index_axis(Axis(0), 0);
@@ -160,7 +158,7 @@ impl<'a> RenderCamera<'a> {
             let face_score = score[1];
 
             if face_score > CONFIDENCE_THRESHOLD {
-                self.try_update_latest_box(boxes_array, i);
+                self.try_update_latest_box(boxes_array.into_dyn(), i);
             }
             self.frame_count = 0;
         }
@@ -177,11 +175,7 @@ impl<'a> RenderCamera<'a> {
         get_resized_image(&cropped_face, orig_w, orig_h)
     }
 
-    fn try_update_latest_box(
-        &mut self,
-        boxes_array: ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>>,
-        index: usize,
-    ) {
+    fn try_update_latest_box(&mut self, boxes_array: ArrayD<f32>, index: usize) {
         let boxes_batch = boxes_array.index_axis(Axis(0), 0);
         let box_coords = boxes_batch.index_axis(Axis(0), index);
 
