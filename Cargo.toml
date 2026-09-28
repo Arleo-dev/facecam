@@ -14,3 +14,4 @@ imageproc = "0.27.0"
 ndarray = "0.17.2"
 fast_image_resize = "6.1.0"
 ort = "2.0.0-rc.13"
+tokio = { version = "1.53.1", features = ["full"] }

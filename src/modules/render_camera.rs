@@ -1,14 +1,10 @@
-use std::{cell::RefCell, rc::Rc};
+use std::sync::{Arc, Mutex};
 
 use fast_image_resize::images::Image;
 use image::ImageBuffer;
 use imageproc::geometric_transformations::Border;
 use ndarray::{ArrayD, Axis};
-use nokhwa::{
-    pixel_format::{RgbAFormat, RgbFormat},
-    utils::{RequestedFormat, RequestedFormatType},
-    Camera,
-};
+use nokhwa::{pixel_format::RgbAFormat, utils::Resolution, Buffer};
 use ort::{
     session::{builder::GraphOptimizationLevel, Session},
     value::TensorRef,
@@ -17,28 +13,16 @@ use ort::{
 const CONFIDENCE_THRESHOLD: f32 = 0.55;
 
 pub struct RenderCamera {
-    camera: nokhwa::Camera,
-    virtual_camera: virtualcam_rs::Camera,
+    pub resolution: Resolution,
     ort_session: Session,
     frame_count: u8,
-    pub effects_config: Rc<RefCell<EffectsConfig>>,
+    pub effects_config: Arc<Mutex<EffectsConfig>>,
     latest_raw_box: DetectionRect<f32>,
-    is_work: bool
+    is_work: bool,
 }
 
 impl Default for RenderCamera {
     fn default() -> Self {
-        let camera = Camera::new(
-            nokhwa::utils::CameraIndex::Index(0),
-            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
-        )
-        .unwrap();
-        let virtual_camera = virtualcam_rs::Camera::new(
-            camera.resolution().width() as i32,
-            camera.resolution().height() as i32,
-            "Unity Video Capture",
-        )
-        .unwrap();
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/version-RFB-640.onnx", path.display());
 
@@ -52,83 +36,77 @@ impl Default for RenderCamera {
             .expect("Failed to load ONNX model");
 
         Self {
-            camera,
-            virtual_camera,
+            resolution: Resolution::new(1920, 1080),
             ort_session,
             frame_count: 0,
             latest_raw_box: DetectionRect::default(),
-            effects_config: Rc::new(RefCell::new(EffectsConfig::default())),
-            is_work: false
+            effects_config: Arc::new(Mutex::new(EffectsConfig::default())),
+            is_work: false,
         }
     }
 }
 
 impl Drop for RenderCamera {
     fn drop(&mut self) {
-        self.set_default_img();
+        self.get_default_img();
     }
 }
 
 impl RenderCamera {
-    pub fn update_camera_image(&mut self) {
-        if self.is_work {
-            self.set_default_img();
-            return;
-        }
-
-        match self.camera.frame() {
-            Ok(frame) => {
-                let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
-                    frame.decode_image::<RgbAFormat>().unwrap();
-
-                let effects = self.effects_config.borrow();
-
-                if effects.activations.is_zoom {
-                    drop(effects);
-                    image = self.get_zoomed_face(image);
-                } else {
-                    drop(effects);
-                };
-
-                let effects = self.effects_config.borrow();
-                image = if effects.activations.is_racoon {
-                    drop(effects);
-                    self.get_rotated_img(image)
-                } else {
-                    drop(effects);
-                    self.get_color_effected_image(image)
-                };
-
-                let pixels = get_pixels_from_img(image);
-                let _ = self.virtual_camera.send(pixels);
-            }
-            Err(e) => {
-                eprintln!("Dropped a frame or MSMF backend lagged: {:?}", e);
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            }
-        }
+    pub fn set_resolution(&mut self, res: Resolution) {
+        self.resolution = res;
     }
 
-    pub fn start_camera(&mut self){
+    pub fn get_edited_camera_image(&mut self, frame: Buffer) -> Vec<u8> {
+        if !self.is_work {
+            return self.get_default_img();
+        }
+
+        let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
+            frame.decode_image::<RgbAFormat>().unwrap();
+
+        let effects = self.effects_config.lock().unwrap();
+
+        if effects.activations.is_zoom {
+            drop(effects);
+            image = self.get_zoomed_face(image);
+        } else {
+            drop(effects);
+        };
+
+        let effects = self.effects_config.lock().unwrap();
+        image = if effects.activations.is_racoon {
+            drop(effects);
+            self.get_rotated_img(image)
+        } else {
+            drop(effects);
+            self.get_color_effected_image(image)
+        };
+
+        let pixels = get_pixels_from_img(image);
+        pixels
+    }
+
+    pub fn start_camera(&mut self) {
         self.is_work = true;
     }
 
-    pub fn stop_camera(&mut self){
+    pub fn stop_camera(&mut self) {
         self.is_work = false;
     }
-    
-    pub fn is_work(&self) -> bool{
+
+    pub fn is_work(&self) -> bool {
         self.is_work
     }
 
-    fn set_default_img(&mut self){
+    pub fn get_default_img(&mut self) -> Vec<u8> {
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/on_exit_img.jpg", path.display());
         let mut img = image::open(path).unwrap().into_rgba8();
-        let res = self.camera.resolution();
+        let res = self.resolution;
         img = get_resized_image(&img, res.width(), res.height());
         let pixels = get_pixels_from_img(img);
-        let _ = self.virtual_camera.send(pixels);
+        pixels
     }
 
     fn get_zoomed_face(
@@ -141,7 +119,7 @@ impl RenderCamera {
         let model_w = 640;
 
         self.frame_count += 1;
-        if self.frame_count % 3 == 0 || self.latest_raw_box.is_default() {
+        if self.frame_count % 5 == 0 || self.latest_raw_box.is_default() {
             let resized_frame = get_resized_image(&frame, model_w, model_h);
             let (scores_array, boxes_array) = {
                 let mut input =
@@ -186,7 +164,7 @@ impl RenderCamera {
             self.frame_count = 0;
         }
 
-        let current_zoom = self.effects_config.borrow().zoom_factor;
+        let current_zoom = self.effects_config.lock().unwrap().zoom_factor;
         let (x, y, w, h) =
             get_box_size_with_scale(current_zoom, self.latest_raw_box.clone(), orig_w, orig_h);
 
@@ -235,7 +213,7 @@ impl RenderCamera {
     }
 
     fn get_color_effected_pixel(&mut self, pixel: &image::Rgba<u8>) -> image::Rgba<u8> {
-        let rgb = self.effects_config.borrow().rgb;
+        let rgb = self.effects_config.lock().unwrap().rgb;
         let r = pixel.0[0].max(rgb.0[0]);
         let g = pixel.0[1].max(rgb.0[1]);
         let b = pixel.0[2].max(rgb.0[2]);
@@ -250,7 +228,7 @@ impl RenderCamera {
         let (cx, cy) = (image.width() as i32 / 2, image.height() as i32 / 2);
         let mut image = imageproc::geometric_transformations::rotate_about_center(
             &image,
-            self.effects_config.borrow().rotation,
+            self.effects_config.lock().unwrap().rotation,
             imageproc::geometric_transformations::Interpolation::Nearest,
             Border::Constant(image::Rgba([0, 0, 0, 255])),
         );

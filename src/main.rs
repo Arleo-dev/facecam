@@ -1,8 +1,13 @@
+use std::cell::RefCell;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+
+use facecam::modules::render_camera::RenderCamera;
+use nokhwa::pixel_format::RgbFormat;
+use nokhwa::utils::{RequestedFormat, RequestedFormatType};
 use nokhwa::*;
-
-use eframe::{self};
 use view_app::ViewApp;
-
 mod view_app;
 
 fn main() {
@@ -13,11 +18,59 @@ fn main() {
         println!("{device}");
     }
 
+    let shared = Arc::new(Mutex::new(RenderCamera::default()));
+    shared.lock().unwrap().stop_camera();
+    let running = Arc::new(AtomicBool::new(true));
+    let running_cam = running.clone();
+    let shared_cam = shared.clone();
+
+    let camera_thread = thread::spawn(move || {
+        let camera = RefCell::new(
+            Camera::new(
+                nokhwa::utils::CameraIndex::Index(0),
+                RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+            )
+            .unwrap(),
+        );
+        let res = camera.borrow().resolution();
+        let (w, h) = (res.width(), res.height());
+
+        {
+            let mut cam_lock = shared_cam.lock().unwrap();
+            cam_lock.set_resolution(res);
+            cam_lock.start_camera();
+        }
+        
+        let virtual_camera = RefCell::new(
+            virtualcam_rs::Camera::new(w as i32, h as i32, "Unity Video Capture").unwrap(),
+        );
+
+        while running_cam.load(Ordering::Relaxed) {
+            let buffer = match camera.borrow_mut().frame() {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("frame error: {e}");
+                    continue;
+                }
+            };
+            let pixels = shared_cam.lock().unwrap().get_edited_camera_image(buffer);
+            let _ = virtual_camera.borrow_mut().send(pixels);
+        }
+        let default_img = shared_cam.lock().unwrap().get_default_img();
+        let _ = virtual_camera.borrow_mut().send(default_img);
+    });
+
     let mut options = eframe::NativeOptions::default();
     options.viewport = eframe::egui::ViewportBuilder::default()
         .with_always_on_top()
         .with_resizable(false)
-        .with_inner_size(eframe::egui::Vec2::new(300f32, 250f32));
-    let app = Box::new(ViewApp::default());
-    eframe::run_native("Racoon Camera", options, Box::new(|_cc| Ok(app))).unwrap();
+        .with_inner_size(eframe::egui::Vec2::new(300.0, 250.0));
+
+    let app = Box::new(ViewApp::new(shared));
+    let result = eframe::run_native("Racoon Camera", options, Box::new(|_cc| Ok(app)));
+
+    running.store(false, Ordering::Relaxed);
+    let _ = camera_thread.join();
+
+    result.unwrap();
 }

@@ -1,17 +1,19 @@
+use std::sync::{Arc, Mutex};
+
 use eframe::{self, egui::Color32};
 use facecam::modules::render_camera::{EffectsActivationConfig, RenderCamera};
 
 const MAX_ZOOM_FACTOR: f32 = 10f32;
 
 pub struct ViewApp {
-    camera: RenderCamera,
+    camera: Arc<Mutex<RenderCamera>>,
     rotate_delta: f32,
 }
 
-impl Default for ViewApp {
-    fn default() -> Self {
+impl ViewApp {
+    pub fn new(camera: Arc<Mutex<RenderCamera>>) -> Self {
         Self {
-            camera: RenderCamera::default(),
+            camera,
             rotate_delta: 0.0,
         }
     }
@@ -22,8 +24,8 @@ impl eframe::App for ViewApp {
         ui.request_repaint();
 
         eframe::egui::CentralPanel::default().show(ui, |ui: &mut eframe::egui::Ui| {
-            self.camera.update_camera_image();
-            let mut is_camera_work = self.camera.is_work();
+            let mut camera = self.camera.lock().unwrap();
+            let mut is_camera_work = camera.is_work();
 
             if ui
                 .add(eframe::egui::Checkbox::new(
@@ -33,13 +35,13 @@ impl eframe::App for ViewApp {
                 .changed()
             {
                 if is_camera_work {
-                    self.camera.start_camera();
+                    camera.start_camera();
                 } else {
-                    self.camera.stop_camera();
+                    camera.stop_camera();
                 }
             }
 
-            let mut effects_config = self.camera.effects_config.borrow_mut();
+            let mut effects_config = camera.effects_config.lock().unwrap();
 
             let current_effect_color = effects_config.color();
             let mut r = current_effect_color.0[0];
