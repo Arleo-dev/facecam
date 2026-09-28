@@ -12,7 +12,7 @@ use ort::{
 
 const CONFIDENCE_THRESHOLD: f32 = 0.55;
 
-pub struct RenderCamera {
+pub struct ImageProcessor {
     pub resolution: Resolution,
     ort_session: Session,
     frame_count: u8,
@@ -21,7 +21,7 @@ pub struct RenderCamera {
     is_work: bool,
 }
 
-impl Default for RenderCamera {
+impl Default for ImageProcessor {
     fn default() -> Self {
         let path = std::env::current_dir().unwrap();
         let path = format!("{}/resources/version-RFB-640.onnx", path.display());
@@ -46,13 +46,13 @@ impl Default for RenderCamera {
     }
 }
 
-impl Drop for RenderCamera {
+impl Drop for ImageProcessor {
     fn drop(&mut self) {
         self.get_default_img();
     }
 }
 
-impl RenderCamera {
+impl ImageProcessor {
     pub fn set_resolution(&mut self, res: Resolution) {
         self.resolution = res;
     }
@@ -64,7 +64,7 @@ impl RenderCamera {
 
         let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
             frame.decode_image::<RgbAFormat>().unwrap();
-
+        
         let effects = self.effects_config.lock().unwrap();
 
         if effects.activations.is_zoom {

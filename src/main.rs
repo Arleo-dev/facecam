@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use facecam::modules::render_camera::RenderCamera;
+use facecam::modules::render::ImageProcessor;
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{RequestedFormat, RequestedFormatType};
 use nokhwa::*;
@@ -18,11 +18,10 @@ fn main() {
         println!("{device}");
     }
 
-    let shared = Arc::new(Mutex::new(RenderCamera::default()));
-    shared.lock().unwrap().stop_camera();
+    let shared = Arc::new(Mutex::new(ImageProcessor::default()));
     let running = Arc::new(AtomicBool::new(true));
     let running_cam = running.clone();
-    let shared_cam = shared.clone();
+    let shared_img_proc = shared.clone();
 
     let camera_thread = thread::spawn(move || {
         let camera = RefCell::new(
@@ -36,11 +35,11 @@ fn main() {
         let (w, h) = (res.width(), res.height());
 
         {
-            let mut cam_lock = shared_cam.lock().unwrap();
-            cam_lock.set_resolution(res);
-            cam_lock.start_camera();
+            let mut process_lock = shared_img_proc.lock().unwrap();
+            process_lock.set_resolution(res);
+            process_lock.start_camera();
         }
-        
+
         let virtual_camera = RefCell::new(
             virtualcam_rs::Camera::new(w as i32, h as i32, "Unity Video Capture").unwrap(),
         );
@@ -53,10 +52,10 @@ fn main() {
                     continue;
                 }
             };
-            let pixels = shared_cam.lock().unwrap().get_edited_camera_image(buffer);
+            let pixels = shared_img_proc.lock().unwrap().get_edited_camera_image(buffer);
             let _ = virtual_camera.borrow_mut().send(pixels);
         }
-        let default_img = shared_cam.lock().unwrap().get_default_img();
+        let default_img = shared_img_proc.lock().unwrap().get_default_img();
         let _ = virtual_camera.borrow_mut().send(default_img);
     });
 

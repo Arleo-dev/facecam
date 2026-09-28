@@ -1,19 +1,19 @@
 use std::sync::{Arc, Mutex};
 
 use eframe::{self, egui::Color32};
-use facecam::modules::render_camera::{EffectsActivationConfig, RenderCamera};
+use facecam::modules::render::{EffectsActivationConfig, ImageProcessor};
 
 const MAX_ZOOM_FACTOR: f32 = 10f32;
 
 pub struct ViewApp {
-    camera: Arc<Mutex<RenderCamera>>,
+    image_porcessor: Arc<Mutex<ImageProcessor>>,
     rotate_delta: f32,
 }
 
 impl ViewApp {
-    pub fn new(camera: Arc<Mutex<RenderCamera>>) -> Self {
+    pub fn new(image_porcessor: Arc<Mutex<ImageProcessor>>) -> Self {
         Self {
-            camera,
+            image_porcessor,
             rotate_delta: 0.0,
         }
     }
@@ -24,7 +24,7 @@ impl eframe::App for ViewApp {
         ui.request_repaint();
 
         eframe::egui::CentralPanel::default().show(ui, |ui: &mut eframe::egui::Ui| {
-            let mut camera = self.camera.lock().unwrap();
+            let mut camera = self.image_porcessor.lock().unwrap();
             let mut is_camera_work = camera.is_work();
 
             if ui
@@ -121,8 +121,6 @@ impl eframe::App for ViewApp {
 
             if effects_config.is_zoom() {
                 let mut zoom_factor = effects_config.zoom_factor();
-
-                // .step_by(0.05) дає змогу точно змінювати дробові значення (наприклад, 2.65, 2.70)
                 let sl_zoom = eframe::egui::Slider::new(&mut zoom_factor, 1.0..=MAX_ZOOM_FACTOR)
                     .step_by(0.05)
                     .text("zoom");
