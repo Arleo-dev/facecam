@@ -23,6 +23,7 @@ pub struct RenderCamera {
     frame_count: u8,
     pub effects_config: Rc<RefCell<EffectsConfig>>,
     latest_raw_box: DetectionRect<f32>,
+    is_work: bool
 }
 
 impl Default for RenderCamera {
@@ -57,24 +58,24 @@ impl Default for RenderCamera {
             frame_count: 0,
             latest_raw_box: DetectionRect::default(),
             effects_config: Rc::new(RefCell::new(EffectsConfig::default())),
+            is_work: false
         }
     }
 }
 
 impl Drop for RenderCamera {
     fn drop(&mut self) {
-        let path = std::env::current_dir().unwrap();
-        let path = format!("{}/resources/on_exit_img.jpg", path.display());
-        let mut img = image::open(path).unwrap().into_rgba8();
-        let res = self.camera.resolution();
-        img = get_resized_image(&img, res.width(), res.height());
-        let pixels = get_pixels_from_img(img);
-        let _ = self.virtual_camera.send(pixels);
+        self.set_default_img();
     }
 }
 
 impl RenderCamera {
-    pub fn set_camera_image(&mut self) {
+    pub fn update_camera_image(&mut self) {
+        if self.is_work {
+            self.set_default_img();
+            return;
+        }
+
         match self.camera.frame() {
             Ok(frame) => {
                 let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
@@ -106,6 +107,28 @@ impl RenderCamera {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
+    }
+
+    pub fn start_camera(&mut self){
+        self.is_work = true;
+    }
+
+    pub fn stop_camera(&mut self){
+        self.is_work = false;
+    }
+    
+    pub fn is_work(&self) -> bool{
+        self.is_work
+    }
+
+    fn set_default_img(&mut self){
+        let path = std::env::current_dir().unwrap();
+        let path = format!("{}/resources/on_exit_img.jpg", path.display());
+        let mut img = image::open(path).unwrap().into_rgba8();
+        let res = self.camera.resolution();
+        img = get_resized_image(&img, res.width(), res.height());
+        let pixels = get_pixels_from_img(img);
+        let _ = self.virtual_camera.send(pixels);
     }
 
     fn get_zoomed_face(

@@ -22,7 +22,23 @@ impl eframe::App for ViewApp {
         ui.request_repaint();
 
         eframe::egui::CentralPanel::default().show(ui, |ui: &mut eframe::egui::Ui| {
-            self.camera.set_camera_image();
+            self.camera.update_camera_image();
+            let mut is_camera_work = self.camera.is_work();
+
+            if ui
+                .add(eframe::egui::Checkbox::new(
+                    &mut is_camera_work,
+                    "Camera on/off",
+                ))
+                .changed()
+            {
+                if is_camera_work {
+                    self.camera.start_camera();
+                } else {
+                    self.camera.stop_camera();
+                }
+            }
+
             let mut effects_config = self.camera.effects_config.borrow_mut();
 
             let current_effect_color = effects_config.color();
