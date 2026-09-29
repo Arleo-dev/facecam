@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use fast_image_resize::images::Image;
-use image::ImageBuffer;
+use image::{math::Rect, ImageBuffer};
 use imageproc::geometric_transformations::Border;
 use ndarray::{ArrayD, Axis};
 use nokhwa::{pixel_format::RgbAFormat, utils::Resolution, Buffer};
@@ -18,6 +18,7 @@ pub struct ImageProcessor {
     frame_count: u8,
     pub effects_config: Arc<Mutex<EffectsConfig>>,
     latest_raw_box: DetectionRect<f32>,
+    latest_box: Rect,
     is_work: bool,
 }
 
@@ -40,6 +41,12 @@ impl Default for ImageProcessor {
             ort_session,
             frame_count: 0,
             latest_raw_box: DetectionRect::default(),
+            latest_box: Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
             effects_config: Arc::new(Mutex::new(EffectsConfig::default())),
             is_work: false,
         }
@@ -64,7 +71,7 @@ impl ImageProcessor {
 
         let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
             frame.decode_image::<RgbAFormat>().unwrap();
-        
+
         let effects = self.effects_config.lock().unwrap();
 
         if effects.activations.is_zoom {
@@ -119,6 +126,7 @@ impl ImageProcessor {
         let model_w = 640;
 
         self.frame_count += 1;
+
         if self.frame_count % 5 == 0 || self.latest_raw_box.is_default() {
             let resized_frame = get_resized_image(&frame, model_w, model_h);
             let (scores_array, boxes_array) = {
@@ -158,10 +166,19 @@ impl ImageProcessor {
 
             let face_score = score[1];
 
-            if face_score > CONFIDENCE_THRESHOLD {
-                self.try_update_latest_box(boxes_array.into_dyn(), i);
+            if face_score > CONFIDENCE_THRESHOLD || self.latest_raw_box.is_default() {
+                let boxes_batch = boxes_array.index_axis(Axis(0), 0);
+                let box_coords = boxes_batch.index_axis(Axis(0), i);
+
+                self.latest_raw_box
+                    .set_min(box_coords[0], box_coords[1])
+                    .set_max(box_coords[2], box_coords[3]);
             }
             self.frame_count = 0;
+        }
+
+        if self.latest_raw_box.is_default() {
+            return frame;
         }
 
         let current_zoom = self.effects_config.lock().unwrap().zoom_factor;
@@ -172,46 +189,53 @@ impl ImageProcessor {
             return frame;
         }
 
-        let cropped_face = image::imageops::crop_imm(&frame, x, y, w, h).to_image();
+        let detection_box = self.latest_box;
+
+        let delta_x = (x as i32 - detection_box.x as i32).abs();
+        let delta_y = (y as i32 - detection_box.y as i32).abs();
+
+        let threshold_x = (detection_box.width / 4) as i32;
+        let threshold_y = (detection_box.height / 4) as i32;
+
+        if detection_box.width == 0
+            || detection_box.height == 0
+            || delta_x > threshold_x
+            || delta_y > threshold_y
+            || detection_box.width > w
+            || detection_box.width < w
+            || detection_box.height > h
+            || detection_box.height < h
+        {
+            self.latest_box = Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            };
+        }
+
+        let tracking_box = self.latest_box;
+        if tracking_box.width == 0 || tracking_box.height == 0 {
+            self.latest_box = Rect {
+                x,
+                y,
+                width: w,
+                height: h,
+            };
+        }
+
+        let cropped_face = image::imageops::crop_imm(
+            &frame,
+            tracking_box.x,
+            tracking_box.y,
+            tracking_box.width,
+            tracking_box.height,
+        )
+        .to_image();
+
         get_resized_image(&cropped_face, orig_w, orig_h)
     }
-
-    fn try_update_latest_box(&mut self, boxes_array: ArrayD<f32>, index: usize) {
-        let boxes_batch = boxes_array.index_axis(Axis(0), 0);
-        let box_coords = boxes_batch.index_axis(Axis(0), index);
-
-        let new_x_min = box_coords[0];
-        let new_y_min = box_coords[1];
-        let new_x_max = box_coords[2];
-        let new_y_max = box_coords[3];
-
-        let prev_w = self.latest_raw_box.x_max - self.latest_raw_box.x_min;
-        let prev_h = self.latest_raw_box.y_max - self.latest_raw_box.y_min;
-
-        let new_w = new_x_max - new_x_min;
-        let new_h = new_y_max - new_y_min;
-
-        let prev_cx = self.latest_raw_box.x_min + prev_w / 2.0;
-        let prev_cy = self.latest_raw_box.y_min + prev_h / 2.0;
-        let new_cx = new_x_min + new_w / 2.0;
-        let new_cy = new_y_min + new_h / 2.0;
-
-        let shift_x = (new_cx - prev_cx).abs();
-        let shift_y = (new_cy - prev_cy).abs();
-        let delta_w = (new_w - prev_w).abs();
-        let delta_h = (new_h - prev_h).abs();
-
-        let is_first_init = prev_w <= 0.0 || prev_h <= 0.0;
-        let moved_significantly = shift_x > (prev_w / 4.0) || shift_y > (prev_h / 4.0);
-        let resized_significantly = delta_w > (prev_w / 4.0) || delta_h > (prev_h / 4.0);
-
-        if is_first_init || moved_significantly || resized_significantly {
-            self.latest_raw_box
-                .set_min(new_x_min, new_y_min)
-                .set_max(new_x_max, new_y_max);
-        }
-    }
-
+    
     fn get_color_effected_pixel(&mut self, pixel: &image::Rgba<u8>) -> image::Rgba<u8> {
         let rgb = self.effects_config.lock().unwrap().rgb;
         let r = pixel.0[0].max(rgb.0[0]);
