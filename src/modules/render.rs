@@ -184,11 +184,7 @@ impl ImageProcessor {
         let current_zoom = self.effects_config.lock().unwrap().zoom_factor;
         let (x, y, w, h) =
             get_box_size_with_scale(current_zoom, self.latest_raw_box.clone(), orig_w, orig_h);
-
-        if w == 0 || h == 0 {
-            return frame;
-        }
-
+            
         let detection_box = self.latest_box;
 
         let delta_x = (x as i32 - detection_box.x as i32).abs();
