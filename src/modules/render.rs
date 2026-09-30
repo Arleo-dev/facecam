@@ -1,9 +1,7 @@
-use std::sync::{Arc, Mutex};
-
 use fast_image_resize::images::Image;
 use image::{math::Rect, ImageBuffer};
 use imageproc::geometric_transformations::Border;
-use ndarray::{ArrayD, Axis};
+use ndarray::Axis;
 use nokhwa::{pixel_format::RgbAFormat, utils::Resolution, Buffer};
 use ort::{
     session::{builder::GraphOptimizationLevel, Session},
@@ -16,7 +14,7 @@ pub struct ImageProcessor {
     pub resolution: Resolution,
     ort_session: Session,
     frame_count: u8,
-    pub effects_config: Arc<Mutex<EffectsConfig>>,
+    effects_config: ImageEditConfig,
     latest_raw_box: DetectionRect<f32>,
     latest_box: Rect,
     is_work: bool,
@@ -47,7 +45,7 @@ impl Default for ImageProcessor {
                 width: 0,
                 height: 0,
             },
-            effects_config: Arc::new(Mutex::new(EffectsConfig::default())),
+            effects_config: ImageEditConfig::default(),
             is_work: false,
         }
     }
@@ -60,6 +58,10 @@ impl Drop for ImageProcessor {
 }
 
 impl ImageProcessor {
+    pub fn set_config(&mut self, config: ImageEditConfig) {
+        self.effects_config = config;
+    }
+
     pub fn set_resolution(&mut self, res: Resolution) {
         self.resolution = res;
     }
@@ -72,21 +74,15 @@ impl ImageProcessor {
         let mut image: ImageBuffer<image::Rgba<u8>, Vec<u8>> =
             frame.decode_image::<RgbAFormat>().unwrap();
 
-        let effects = self.effects_config.lock().unwrap();
+        let effects = self.effects_config;
 
         if effects.activations.is_zoom {
-            drop(effects);
             image = self.get_zoomed_face(image);
-        } else {
-            drop(effects);
-        };
-
-        let effects = self.effects_config.lock().unwrap();
+        }
+        let effects = self.effects_config;
         image = if effects.activations.is_racoon {
-            drop(effects);
             self.get_rotated_img(image)
         } else {
-            drop(effects);
             self.get_color_effected_image(image)
         };
 
@@ -181,7 +177,7 @@ impl ImageProcessor {
             return frame;
         }
 
-        let current_zoom = self.effects_config.lock().unwrap().zoom_factor;
+        let current_zoom = self.effects_config.zoom_factor;
         let (x, y, w, h) =
             get_box_size_with_scale(current_zoom, self.latest_raw_box.clone(), orig_w, orig_h);
 
@@ -190,8 +186,8 @@ impl ImageProcessor {
         let delta_x = (x as i32 - detection_box.x as i32).abs();
         let delta_y = (y as i32 - detection_box.y as i32).abs();
 
-        let threshold_x = (detection_box.width / 3) as i32;
-        let threshold_y = (detection_box.height / 3) as i32;
+        let threshold_x = (detection_box.width / 4) as i32;
+        let threshold_y = (detection_box.height / 4) as i32;
 
         if detection_box.width == 0
             || detection_box.height == 0
@@ -231,9 +227,9 @@ impl ImageProcessor {
 
         get_resized_image(&cropped_face, orig_w, orig_h)
     }
-    
+
     fn get_color_effected_pixel(&mut self, pixel: &image::Rgba<u8>) -> image::Rgba<u8> {
-        let rgb = self.effects_config.lock().unwrap().rgb;
+        let rgb = self.effects_config.rgb;
         let r = pixel.0[0].max(rgb.0[0]);
         let g = pixel.0[1].max(rgb.0[1]);
         let b = pixel.0[2].max(rgb.0[2]);
@@ -248,7 +244,7 @@ impl ImageProcessor {
         let (cx, cy) = (image.width() as i32 / 2, image.height() as i32 / 2);
         let mut image = imageproc::geometric_transformations::rotate_about_center(
             &image,
-            self.effects_config.lock().unwrap().rotation,
+            self.effects_config.rotation,
             imageproc::geometric_transformations::Interpolation::Nearest,
             Border::Constant(image::Rgba([0, 0, 0, 255])),
         );
@@ -282,7 +278,7 @@ impl ImageProcessor {
     }
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 pub struct EffectsActivationConfig {
     is_zoom: bool,
     is_racoon: bool,
@@ -299,15 +295,15 @@ impl EffectsActivationConfig {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct EffectsConfig {
+#[derive(Clone, Copy, Debug)]
+pub struct ImageEditConfig {
     activations: EffectsActivationConfig,
     zoom_factor: f32,
     rgb: image::Rgb<u8>,
     rotation: f32,
 }
 
-impl EffectsConfig {
+impl ImageEditConfig {
     pub fn color(&self) -> image::Rgb<u8> {
         self.rgb
     }
@@ -360,11 +356,11 @@ impl EffectsConfig {
     }
 }
 
-impl Default for EffectsConfig {
+impl Default for ImageEditConfig {
     fn default() -> Self {
         Self {
             activations: EffectsActivationConfig::default(),
-            zoom_factor: 0f32,
+            zoom_factor: 1f32,
             rgb: image::Rgb([0, 0, 0]),
             rotation: 0f32,
         }

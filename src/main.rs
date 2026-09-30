@@ -1,9 +1,10 @@
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::TryRecvError;
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
-use facecam::modules::render::ImageProcessor;
+use facecam::modules::render::{ImageEditConfig, ImageProcessor};
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{RequestedFormat, RequestedFormatType};
 use nokhwa::*;
@@ -18,45 +19,57 @@ fn main() {
         println!("{device}");
     }
 
-    let shared = Arc::new(Mutex::new(ImageProcessor::default()));
     let running = Arc::new(AtomicBool::new(true));
     let running_cam = running.clone();
-    let shared_img_proc = shared.clone();
+    let (sender, receiver) = mpsc::channel::<(ImageEditConfig, bool)>();
 
     let camera_thread = thread::spawn(move || {
-        let camera = RefCell::new(
-            Camera::new(
-                nokhwa::utils::CameraIndex::Index(0),
-                RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
-            )
-            .unwrap(),
-        );
-        let res = camera.borrow().resolution();
+        let mut image_processor = ImageProcessor::default();
+        let mut camera = Camera::new(
+            nokhwa::utils::CameraIndex::Index(0),
+            RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate),
+        )
+        .unwrap();
+        let res = camera.resolution();
         let (w, h) = (res.width(), res.height());
 
-        {
-            let mut process_lock = shared_img_proc.lock().unwrap();
-            process_lock.set_resolution(res);
-            process_lock.start_camera();
-        }
+        image_processor.set_resolution(res);
+        image_processor.start_camera();
 
-        let virtual_camera = RefCell::new(
-            virtualcam_rs::Camera::new(w as i32, h as i32, "Unity Video Capture").unwrap(),
-        );
+        let mut virtual_camera =
+            virtualcam_rs::Camera::new(w as i32, h as i32, "Unity Video Capture").unwrap();
 
-        while running_cam.load(Ordering::Relaxed) {
-            let buffer = match camera.borrow_mut().frame() {
+        'outer: while running_cam.load(Ordering::Relaxed) {
+            // Drain the channel; keep only the most recent config.
+            let mut newest = None;
+            loop {
+                match receiver.try_recv() {
+                    Ok(cfg) => newest = Some(cfg),
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => break 'outer, // UI closed
+                }
+            }
+            if let Some((config, camera_on)) = newest {
+                image_processor.set_config(config);
+                if camera_on {
+                    image_processor.start_camera();
+                } else {
+                    image_processor.stop_camera();
+                }
+            }
+
+            let buffer = match camera.frame() {
                 Ok(b) => b,
                 Err(e) => {
                     eprintln!("frame error: {e}");
                     continue;
                 }
             };
-            let pixels = shared_img_proc.lock().unwrap().get_edited_camera_image(buffer);
-            let _ = virtual_camera.borrow_mut().send(pixels);
+            let pixels = image_processor.get_edited_camera_image(buffer);
+            let _ = virtual_camera.send(pixels);
         }
-        let default_img = shared_img_proc.lock().unwrap().get_default_img();
-        let _ = virtual_camera.borrow_mut().send(default_img);
+        let default_img = image_processor.get_default_img();
+        let _ = virtual_camera.send(default_img);
     });
 
     let mut options = eframe::NativeOptions::default();
@@ -65,7 +78,7 @@ fn main() {
         .with_resizable(false)
         .with_inner_size(eframe::egui::Vec2::new(300.0, 250.0));
 
-    let app = Box::new(ViewApp::new(shared));
+    let app = Box::new(ViewApp::new(sender));
     let result = eframe::run_native("Racoon Camera", options, Box::new(|_cc| Ok(app)));
 
     running.store(false, Ordering::Relaxed);

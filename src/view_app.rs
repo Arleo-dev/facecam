@@ -1,21 +1,27 @@
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Sender;
 
 use eframe::{self, egui::Color32};
-use facecam::modules::render::{EffectsActivationConfig, ImageProcessor};
+use facecam::modules::render::{EffectsActivationConfig, ImageEditConfig};
 
 const MAX_ZOOM_FACTOR: f32 = 10f32;
 
 pub struct ViewApp {
-    image_porcessor: Arc<Mutex<ImageProcessor>>,
+    effect_config_sender: Sender<(ImageEditConfig, bool)>,
+    current_config: (ImageEditConfig, bool),
     rotate_delta: f32,
 }
 
 impl ViewApp {
-    pub fn new(image_porcessor: Arc<Mutex<ImageProcessor>>) -> Self {
+    pub fn new(sender: Sender<(ImageEditConfig, bool)>) -> Self {
         Self {
-            image_porcessor,
+            current_config: (ImageEditConfig::default(), true),
+            effect_config_sender: sender,
             rotate_delta: 0.0,
         }
+    }
+
+    fn set_config(&mut self, config: (ImageEditConfig, bool)) {
+        self.current_config = config;
     }
 }
 
@@ -24,26 +30,15 @@ impl eframe::App for ViewApp {
         ui.request_repaint();
 
         eframe::egui::CentralPanel::default().show(ui, |ui: &mut eframe::egui::Ui| {
-            let mut camera = self.image_porcessor.lock().unwrap();
-            let mut is_camera_work = camera.is_work();
+            let mut is_camera_work = self.current_config.1;
+            let mut edit_config = self.current_config.0;
 
-            if ui
-                .add(eframe::egui::Checkbox::new(
-                    &mut is_camera_work,
-                    "Camera on/off",
-                ))
-                .changed()
-            {
-                if is_camera_work {
-                    camera.start_camera();
-                } else {
-                    camera.stop_camera();
-                }
-            }
+            ui.add(eframe::egui::Checkbox::new(
+                &mut is_camera_work,
+                "Camera on/off",
+            ));
 
-            let mut effects_config = camera.effects_config.lock().unwrap();
-
-            let current_effect_color = effects_config.color();
+            let current_effect_color = edit_config.color();
             let mut r = current_effect_color.0[0];
             let mut g = current_effect_color.0[1];
             let mut b = current_effect_color.0[2];
@@ -56,7 +51,7 @@ impl eframe::App for ViewApp {
                 )
                 .changed()
             {
-                effects_config.set_red(r);
+                edit_config.set_red(r);
             }
             if ui
                 .add(
@@ -66,7 +61,7 @@ impl eframe::App for ViewApp {
                 )
                 .changed()
             {
-                effects_config.set_green(g);
+                edit_config.set_green(g);
             }
             if ui
                 .add(
@@ -76,27 +71,27 @@ impl eframe::App for ViewApp {
                 )
                 .changed()
             {
-                effects_config.set_blue(b);
+                edit_config.set_blue(b);
             }
 
-            let mut is_zoom = effects_config.is_zoom();
-            let mut is_racoon = effects_config.is_racoon();
-            let mut is_disco = effects_config.is_disco();
+            let mut is_zoom = edit_config.is_zoom();
+            let mut is_racoon = edit_config.is_racoon();
+            let mut is_disco = edit_config.is_disco();
 
             if ui
                 .add(eframe::egui::Checkbox::new(&mut is_racoon, "On Racoon"))
                 .changed()
             {
-                effects_config
+                edit_config
                     .update_activations(EffectsActivationConfig::new(is_zoom, is_racoon, is_disco));
             }
 
-            if effects_config.is_racoon() {
+            if edit_config.is_racoon() {
                 ui.add(eframe::egui::Slider::new(&mut self.rotate_delta, -1.0..=1.0).text("speed"));
-                let current_rot = effects_config.rotation();
-                effects_config.set_rotation(current_rot + self.rotate_delta);
+                let current_rot = edit_config.rotation();
+                edit_config.set_rotation(current_rot + self.rotate_delta);
             } else {
-                effects_config.set_rotation(0f32);
+                edit_config.set_rotation(0f32);
                 self.rotate_delta = 0f32;
             }
 
@@ -104,33 +99,33 @@ impl eframe::App for ViewApp {
                 .add(eframe::egui::Checkbox::new(&mut is_disco, "On Disco"))
                 .changed()
             {
-                effects_config
+                edit_config
                     .update_activations(EffectsActivationConfig::new(is_zoom, is_racoon, is_disco));
+                if !is_disco {
+                    edit_config.set_color(image::Rgb([0, 0, 0]));
+                }
             }
 
             if ui
                 .add(eframe::egui::Checkbox::new(&mut is_zoom, "On Zoom"))
                 .changed()
             {
-                effects_config
+                edit_config
                     .update_activations(EffectsActivationConfig::new(is_zoom, is_racoon, is_disco));
-                if !effects_config.is_disco() {
-                    effects_config.set_color(image::Rgb([0, 0, 0]));
-                }
             }
 
-            if effects_config.is_zoom() {
-                let mut zoom_factor = effects_config.zoom_factor();
+            if edit_config.is_zoom() {
+                let mut zoom_factor = edit_config.zoom_factor();
                 let sl_zoom = eframe::egui::Slider::new(&mut zoom_factor, 1.0..=MAX_ZOOM_FACTOR)
                     .step_by(0.05)
                     .text("zoom");
 
                 if ui.add(sl_zoom).changed() {
-                    effects_config.set_zoom_factor(zoom_factor);
+                    edit_config.set_zoom_factor(zoom_factor);
                 }
             }
 
-            if effects_config.is_disco() {
+            if edit_config.is_disco() {
                 let time = ui.input(|i| i.time);
 
                 let interval = 0.3;
@@ -140,7 +135,13 @@ impl eframe::App for ViewApp {
                 let g = ((step.wrapping_mul(123456789) + 54321) % 100) as u8;
                 let b = ((step.wrapping_mul(987654321) + 67890) % 100) as u8;
 
-                effects_config.set_color(image::Rgb([r, g, b]));
+                edit_config.set_color(image::Rgb([r, g, b]));
+            }
+            let updated_config = (edit_config, is_camera_work);
+            self.set_config(updated_config);
+
+            if let Err(e) = self.effect_config_sender.send(updated_config) {
+                println!("Failed to send data: Channel is closed! Error: {:?}", e);
             }
         });
     }
