@@ -40,13 +40,12 @@ fn main() {
             virtualcam_rs::Camera::new(w as i32, h as i32, "Unity Video Capture").unwrap();
 
         'outer: while running_cam.load(Ordering::Relaxed) {
-            // Drain the channel; keep only the most recent config.
             let mut newest = None;
             loop {
                 match receiver.try_recv() {
                     Ok(cfg) => newest = Some(cfg),
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => break 'outer, // UI closed
+                    Err(TryRecvError::Disconnected) => break 'outer,
                 }
             }
             if let Some((config, camera_on)) = newest {
